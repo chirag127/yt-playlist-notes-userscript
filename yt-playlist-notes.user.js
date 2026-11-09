@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Playlist Notes
 // @namespace    https://github.com/chirag127
-// @version      1.0.1
+// @version      1.0.2
 // @description  One note per video on a playlist, kept in synced storage, with a dot on every row that already has one.
 // @author       chirag127
 // @license      MIT
@@ -74,20 +74,15 @@
   }
 
   function idOf(node) {
-    const vm = node.data && node.data.lockupViewModel ? Ytk.lockupToItem(node.data.lockupViewModel) : null;
-    if (vm && vm.id) return vm.id;
-    if (node.contentId && /^[A-Za-z0-9_-]{11}$/.test(node.contentId)) return node.contentId;
-    const anchor = node.querySelector('a[href*="v="]');
-    const match = anchor ? (anchor.getAttribute('href') || '').match(ID_RE) : null;
-    return match ? match[1] : null;
+    const row = Ytk.readRowNode(node);
+    return row && row.id ? row.id : null;
   }
 
   function titleOf(node) {
-    const vm = node.data && node.data.lockupViewModel ? Ytk.lockupToItem(node.data.lockupViewModel) : null;
-    if (vm && vm.title) return vm.title.trim();
-    const el = node.querySelector(TITLE_SEL);
-    return el ? (el.getAttribute('title') || el.textContent || '').trim() : '';
+    const row = Ytk.readRowNode(node);
+    return row && row.title ? row.title.trim() : '';
   }
+
 
   /** Saved note for a video, or null when there is nothing to show. */
   function readNote(id) {
