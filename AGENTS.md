@@ -1,51 +1,61 @@
-# AGENTS.md — yt-playlist-notes-userscript
+# AGENTS.md — YT Playlist Notes
 
-Read the collection [`AGENTS.md`](../AGENTS.md) and [`PLAN.md`](../PLAN.md) first. Documentation
-lives once in the umbrella repo at `c:\ws\docs\okf\` — do not copy it here.
+Read the collection rules first: [`../AGENTS.md`](../AGENTS.md). Documentation lives once in
+`c:\ws\docs\okf\` — do not create an `okf/` copy here.
 
-## Rules for this script
+## What this repo is
 
-1. Requires `yt-core-lib`. Never copy storage, InnerTube or UI code here.
-2. **EXACTLY ONE context-menu entry**: `Settings…` calling `Ytk.openSettings({...})`. Adding and
-   editing a note are *actions*, so they live on the toolbar and inside the panel — not in the menu.
-3. The action button comes from `Ytk.mountToolbar`. Never draw a bar or a floating widget.
-4. No `innerHTML` — YouTube enforces Trusted Types and the throw is silent inside handlers.
-   Use `Ytk.h`, `Ytk.panel`, `Ytk.kv`, `Ytk.note`, `Ytk.toast`.
-5. **Read-only towards YouTube.** The only write is its own note key in GM storage.
-6. Storage is exactly `Ytk.storeSet('note.' + videoId, { text, at })`, which is `ytk.note.<videoId>`
-   after the core's namespace. Deleting a note is `Ytk.storeDel`. Do not invent a second shape or a
-   second namespace: ScriptCat's cloud sync only replicates script storage.
-7. Gate on `Ytk.featureOn('notes', true)` and return early when off; then guard on the page
-   (`playlistId()` first — the guard uses it, so both stay in sync).
-8. Rows come in two shapes: current `yt-lockup-view-model` and legacy
-   `ytd-playlist-video-renderer` / `ytd-playlist-panel-video-renderer`. Handle all of them.
-9. **No MutationObserver.** Dots are painted at boot, on `yt-navigate-finish`, and after every
-   note change. If that ever proves insufficient, change it in one place (`scheduleDots`) rather
-   than adding a second observer.
+One userscript, one job: keep a text note per video on a playlist and show it next to the row.
+Read-only towards YouTube.
 
-## Verified DOM facts
+## Non-negotiables
 
-- Lockup rows: id = `node.contentId`, title = `node.metadata.lockupMetadataViewModel.title.content`.
-  Both are JS properties on the custom element, not attributes; fall back to `a[href*="v="]` and the
-  title anchor when they are missing.
-- Duration is only a string (`/^\d{1,2}:\d{2}(?::\d{2})?$/`) inside a deep walk of `content`,
-  `text` and `simpleText` keys.
-- Inserting the dot **after** the title anchor, never inside it, or the row's link text changes.
+1. **Exactly one context-menu entry**, `Settings…`, calling `Ytk.openSettings` — nothing else.
+2. **No `innerHTML`.** Panel content uses `Ytk.kv`, `Ytk.note` and `Ytk.h` only.
+3. **Shared toolbar and shared panel only.** The one button is registered with
+   `Ytk.mountToolbar([{ label: 'Notes', run: openNotes }])`. No second bar, no floating widget.
+4. **One storage key per video**: `ytk.note.<videoId>` = `{ text, at }` via
+   `Ytk.storeSet` / `Ytk.storeDel`. Deleting a note removes the key; it does not store an empty
+   object.
+5. **No YouTube writes.** This script never calls `addVideos`, `removeVideos`, `createPlaylist`
+   or any other endpoint.
+6. **Core is required, pinned:** `@require …/yt-core-lib-1.3.0.js`. Row extraction uses
+   `Ytk.lockupToItem`; nothing in the core is re-implemented.
 
-## Not done / uncertain
+## Why the code looks the way it does
 
-- The dot is not updated when YouTube re-renders a single row in place (e.g. the row re-cycles as it
-  scrolls out of the virtualised list). It is repainted on the next navigation or note change.
-- Notes are not indexed: listing "all notes across all playlists" would need `GM_listValues`, which
-  this script does not request.
+- **Two row shapes.** Current playlists render `yt-lockup-view-model` (id in `node.contentId`,
+  title in `node.metadata.lockupMetadataViewModel.title.content`); older sessions render
+  `ytd-playlist-video-renderer` / `ytd-playlist-panel-video-renderer`. `idOf()` tries the lockup
+  view model, then `contentId`, then an `a[href*="v="]` anchor, so neither shape is a dead end.
+- **The marker must not land inside a link.** `markerAnchor()` returns the title's enclosing
+  anchor when there is one and the dot is inserted *after* it, otherwise clicking the dot would
+  open the video.
+- **No `MutationObserver`.** Repainting is driven by `yt-navigate-finish`,
+  `yt-page-data-updated` and a debounced scroll listener. That is cheap and it does not fight
+  YouTube's renderer. The cost is documented in the README: a row re-rendered on hover can lose
+  its dot until the next scroll.
+- **`prompt()` for editing.** A text field inside the floating panel would swallow keyboard
+  shortcuts and needs focus management to be usable; the browser dialog does not.
+- **Script-specific settings are read from the raw blob.** `Ytk.settings()` returns only the core's
+  own `DEFAULTS` keys, so every `notes*` key is read with `raw()` (`Ytk.storeGet('settings', {})`).
+  Each field's `def` is seeded from the stored value for the same reason — `openSettings` resolves
+  its values through `Ytk.settings()`, which cannot see `notesMaxChars`.
+- **Settings survive because of `onSave`.** Core 1.3.0's `openSettings` writes
+  `ytk.settings` through `saveSettings`, which starts from the core defaults and drops keys it does
+  not know (`notesShowMarkers`, `notesSortFirst`, `notesMaxChars`). The `onSave` merge puts them
+  back.
+- **The AI grants stay.** The settings popup renders the shared AI section, which calls
+  `GM_xmlhttpRequest`; without `@grant GM_xmlhttpRequest` + `@connect *` its test fails.
 
-## Shared toolbar caveat (core 1.2.0)
+## Verification before claiming a change works
 
-Each userscript runs in its own sandbox, so the core's `toolbarEl` module state is **per script**.
-With several collection scripts installed, core 1.2.0 therefore draws one `.ytk2-bar` per script, all
-at `left:16px;bottom:16px` — they overlap and only the top one is clickable. Core **1.3.0** fixes it
-by reusing the bar already in the DOM (`toolbarEl = document.querySelector('.ytk2-bar')`).
+```bash
+node --check yt-playlist-notes.user.js
+grep -c "GM_registerMenuCommand('Settings…', settingsPopup);" yt-playlist-notes.user.js   # 1
+grep -c "innerHTML" yt-playlist-notes.user.js                                            # 0
+```
 
-This repo pins the versioned `yt-core-lib-1.2.0.js` URL on purpose (immutable require, no surprise
-core changes). When the collection moves to 1.3.0 on `main`, bump the `@require` here in the same
-commit as the rest — do not point at the unversioned `yt-core-lib.js`.
+Then check it on a real playlist: add a note to a row, confirm the dot appears without a reload,
+reload, confirm the dot and the note text are still there, then delete the note and confirm the
+key is gone and the dot disappears. Static checks alone are not a live test.

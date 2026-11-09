@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         YT Playlist Notes
 // @namespace    https://github.com/chirag127
-// @version      1.0.0
+// @version      1.0.1
 // @description  One note per video on a playlist, kept in synced storage, with a dot on every row that already has one.
 // @author       chirag127
 // @license      MIT
 // @match        https://www.youtube.com/*
-// @require      https://raw.githubusercontent.com/chirag127/yt-core-lib/main/yt-core-lib-1.3.0.js
+// @require      https://raw.githubusercontent.com/chirag127/yt-core-lib/main/yt-core-lib-1.4.0.js
 // @downloadURL  https://raw.githubusercontent.com/chirag127/yt-playlist-notes-userscript/main/yt-playlist-notes.user.js
 // @updateURL    https://raw.githubusercontent.com/chirag127/yt-playlist-notes-userscript/main/yt-playlist-notes.user.js
 // @grant        GM_getValue
