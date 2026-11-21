@@ -31,7 +31,7 @@ async function fixture(t, options = {}) {
   await context.route('**/*', route => {
     const request = route.request();
     if (request.isNavigationRequest() && request.url().startsWith('https://www.youtube.com/')) {
-      return route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><meta charset="utf-8"><title>Playlist notes DOM fixture</title></head><body><ytd-app><ytd-page-manager id="fixture-pages"></ytd-page-manager></ytd-app></body></html>' });
+      return route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Playlist notes DOM fixture</title></head><body><ytd-app><ytd-page-manager id="fixture-pages"></ytd-page-manager></ytd-app></body></html>' });
     }
     requests.push(`${request.method()} ${request.url()}`);
     return route.abort();
@@ -53,6 +53,28 @@ async function fixture(t, options = {}) {
     window.GM_deleteValue = key => { fixtureDeletes.push(key); fixtureStore.delete(key); };
     window.GM_registerMenuCommand = (name, callback) => fixtureMenus.set(name, callback);
     window.GM_xmlhttpRequest = () => { throw new Error('Unexpected network API call'); };
+
+    // Delegate to the controlled browser clock while recording cancellation before execution.
+    const setTimer = window.setTimeout.bind(window);
+    const clearTimer = window.clearTimeout.bind(window);
+    window.fixtureTimers = new Map();
+    window.setTimeout = function (callback, delay, ...args) {
+      if (typeof callback !== 'function' || !new Error().stack.includes('yt-playlist-notes.user.js')) {
+        return setTimer(callback, delay, ...args);
+      }
+      const timer = { delay, canceled: false, fired: 0 };
+      const id = setTimer(function (...values) {
+        timer.fired++;
+        return callback.apply(this, values);
+      }, delay, ...args);
+      fixtureTimers.set(id, timer);
+      return id;
+    };
+    window.clearTimeout = function (id) {
+      const timer = fixtureTimers.get(id);
+      if (timer && timer.fired === 0) timer.canceled = true;
+      return clearTimer(id);
+    };
 
     // Instrument native observers; delivery and DOM matching remain browser implementations.
     const NativeObserver = window.MutationObserver;
@@ -130,6 +152,7 @@ async function advance(page, milliseconds = 450) {
 async function state(page) {
   return page.evaluate(() => ({
     reads: fixtureReads.slice(),
+    timers: Array.from(fixtureTimers, ([id, timer]) => ({ id, ...timer })),
     callbacks: fixtureObservers.reduce((sum, observer) => sum + observer.callbacks, 0),
     targets: fixtureObservers.flatMap(observer => Array.from(observer.targets, ([target, options]) => ({
       tag: target.nodeName, id: target.id || '', subtree: !!options.subtree
@@ -246,6 +269,34 @@ test('scopes mutations to changed playlist rows and stays idle after its own wri
   assert.deepEqual((await state(page)).reads, painted.reads, 'recommendation mutations do not trigger playlist reads');
 });
 
+test('sustained scroll leaves settled rows idle and paints only mutated rows', async t => {
+  const ids = Array.from({ length: 100 }, (_, i) => String(i).padStart(11, '0'));
+  const page = await fixture(t, { ids, notes: Object.fromEntries(ids.map(id => [id, saved])) });
+  assert.equal(await page.locator('#fixture-root ' + MARK).count(), 100);
+  const before = await state(page);
+  for (let i = 0; i < 20; i++) {
+    await page.evaluate(() => window.dispatchEvent(new Event('scroll')));
+    await advance(page, 100);
+  }
+  await advance(page);
+  const scrolled = await state(page);
+  const extraReads = scrolled.reads.length - before.reads.length;
+  console.log(JSON.stringify({ scenario: 'sustained-scroll', rows: 100, events: 20, extraReads }));
+  assert.equal(extraReads, 0, 'scrolling an unchanged root must not read every row again');
+  assert.equal(scrolled.timers.length, before.timers.length, 'unchanged scroll must not queue repaint timers');
+
+  await page.evaluate(id => {
+    const row = document.querySelector('#fixture-root > [data-fixture-id="' + id + '"]');
+    row.querySelector('.fixture-title').replaceWith(fixtureRow(id).querySelector('.fixture-title'));
+  }, ids[50]);
+  for (let i = 0; i < 5; i++) {
+    await page.evaluate(() => window.dispatchEvent(new Event('scroll')));
+    await advance(page, 100);
+  }
+  assert.deepEqual((await state(page)).reads.slice(scrolled.reads.length), [ids[50]], 'row changes still repaint during scrolling');
+  assert.equal(await page.locator('#fixture-root ' + MARK).count(), 100);
+});
+
 test('coalesces continuous row mutations without starving the repaint', async t => {
   const page = await fixture(t);
   await page.evaluate(() => document.querySelector('.ytk-notes-mark').remove());
@@ -265,17 +316,19 @@ test('waits for a late playlist root and then stops broad discovery', async t =>
   assert.equal((await state(page)).targets.filter(target => target.subtree).every(target => target.id === 'fixture-root'), true);
 });
 
-test('caps root discovery and retries on a later YouTube page event', async t => {
-  const page = await fixture(t, { root: false });
-  await advance(page, 11000);
-  assert.deepEqual((await state(page)).targets, [], 'a missing playlist does not leave an indefinite subtree observer');
-  await page.evaluate(() => {
-    document.dispatchEvent(new Event('yt-page-data-updated'));
-    fixtureMount();
+for (const event of ['yt-page-data-updated', 'scroll']) {
+  test(`caps root discovery and retries on a later ${event} event`, async t => {
+    const page = await fixture(t, { root: false });
+    await advance(page, 11000);
+    assert.deepEqual((await state(page)).targets, [], 'a missing playlist does not leave an indefinite subtree observer');
+    await page.evaluate(event => {
+      (event === 'scroll' ? window : document).dispatchEvent(new Event(event));
+      fixtureMount();
+    }, event);
+    await advance(page);
+    assert.equal(await page.locator('#fixture-root ' + MARK).count(), 1);
   });
-  await advance(page);
-  assert.equal(await page.locator('#fixture-root ' + MARK).count(), 1);
-});
+}
 
 test('finds a title inserted after its row', async t => {
   const page = await fixture(t, { notes: { [FIRST]: saved, [SECOND]: saved } });
@@ -342,6 +395,35 @@ test('starts on SPA playlist arrival, cancels queued paints on leave, and remoun
   assert.equal(await page.locator('#fixture-root ' + MARK).count(), 1);
   assert.equal(await page.locator('.ytk2-bar button').count(), 1);
 });
+
+for (const transition of ['navigation', 'pagehide', 'feature-disable', 'markers-disable']) {
+  test(`cancels the queued repaint callback on ${transition} before it executes`, async t => {
+    const page = await fixture(t);
+    await page.evaluate(() => document.querySelector('#fixture-root .ytk-notes-mark').remove());
+    await advance(page, 100);
+    const before = await state(page);
+    const pending = before.timers.filter(timer => !timer.canceled && timer.fired === 0);
+    assert.equal(pending.length, 1, 'a row mutation queued one pending repaint');
+    const id = pending[0].id;
+    await page.evaluate(transition => {
+      if (transition === 'navigation') document.dispatchEvent(new Event('yt-navigate-start'));
+      else if (transition === 'pagehide') window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+      else {
+        Ytk.storeSet('settings', transition === 'feature-disable' ? { features: { notes: false } } : { notesShowMarkers: false });
+        document.dispatchEvent(new Event('yt-page-data-updated'));
+      }
+    }, transition);
+    const canceled = (await state(page)).timers.find(timer => timer.id === id);
+    assert.equal(canceled.canceled, true, 'teardown must clear the pending timer, not leave it to no-op');
+    assert.equal(canceled.fired, 0);
+    await advance(page, 2000);
+    const after = await state(page);
+    assert.equal(after.timers.find(timer => timer.id === id).fired, 0, 'the canceled callback must never execute');
+    assert.deepEqual(after.reads, before.reads, 'no row reads after teardown');
+    assert.deepEqual(after.targets, []);
+    console.log(JSON.stringify({ scenario: 'queued-paint-cancellation', transition, canceled: true, fired: 0 }));
+  });
+}
 
 for (const setting of ['notesShowMarkers', 'feature']) {
   test(`disconnects while ${setting} is disabled and resumes after a settings event`, async t => {

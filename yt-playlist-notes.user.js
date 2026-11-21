@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Playlist Notes
 // @namespace    https://github.com/chirag127
-// @version      1.0.3
+// @version      1.0.4
 // @description  One note per video on a playlist, kept in synced storage, with a dot on every row that already has one.
 // @author       chirag127
 // @license      MIT
@@ -396,7 +396,10 @@
   document.addEventListener('yt-navigate-start', suspend);
   document.addEventListener('yt-navigate-finish', resume);
   document.addEventListener('yt-page-data-updated', refresh);
-  window.addEventListener('scroll', refresh, { passive: true });
+  window.addEventListener('scroll', function () {
+    // Observed rows repaint from mutations; scrolling only needs lifecycle recovery.
+    if (!markerRoot || !markersEnabled() || rowRoot() !== markerRoot) refresh();
+  }, { passive: true });
   window.addEventListener('storage', function (event) {
     if (event.key === null || event.key === 'ytk.settings' || event.key.indexOf('ytk.note.') === 0) refresh();
   });

@@ -47,12 +47,16 @@ from swallowing keyboard shortcuts while you type. An empty note deletes the sto
 
 Dots are restored when YouTube replaces a playlist row or its title, without needing a scroll.
 Updates are batched within 400 ms and scoped to the playlist's rendered rows. Recycled rows read
-the current video's note, and dots stay outside video links.
+the current video's note, and dots stay outside video links. Scrolling an already observed
+playlist does not rescan unchanged rows.
 
 Marker observation stops when markers are disabled or you leave the playlist. In-app navigation
 and returning to the page reconnect it. A late playlist root gets a ten-second discovery window;
 if it arrives later, a page update or scroll retries discovery. The Notes panel still lists only
 the rows YouTube has rendered.
+
+Immediate marker refresh after a manager-only/cloud sync change has not been verified. Reload
+the page if a synced note is not yet reflected.
 
 ## Install
 

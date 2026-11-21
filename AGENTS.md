@@ -40,6 +40,9 @@ Read-only towards YouTube.
   observers, queued rows and owned dots on root changes, disabling markers, navigation or
   `pagehide`. Feature disable/navigation also unmount this script's shared toolbar contribution;
   `pageshow` and playlist arrival can mount it again.
+- **Scroll is a recovery signal.** Reconcile missing/replaced roots and disabled markers on scroll;
+  an unchanged observed root relies on affected-row mutations instead of whole-playlist scans.
+  Page/settings events and note edits still refresh markers.
 - **`prompt()` for editing.** A text field inside the floating panel would swallow keyboard
   shortcuts and needs focus management to be usable; the browser dialog does not.
 - **Script-specific settings are read from the raw blob.** `Ytk.settings()` returns only the core's
