@@ -43,10 +43,16 @@ from swallowing keyboard shortcuts while you type. An empty note deletes the sto
 - It does not scan a playlist you have not scrolled. The panel lists the rows YouTube has
   rendered, so scroll first on a long playlist.
 
-## Known rough edge
+## Marker updates
 
-The marker is repainted after an in-app navigation and on scroll, not by a mutation observer. If
-YouTube re-renders a single row on hover, that row's dot can disappear until the next scroll.
+Dots are restored when YouTube replaces a playlist row or its title, without needing a scroll.
+Updates are batched within 400 ms and scoped to the playlist's rendered rows. Recycled rows read
+the current video's note, and dots stay outside video links.
+
+Marker observation stops when markers are disabled or you leave the playlist. In-app navigation
+and returning to the page reconnect it. A late playlist root gets a ten-second discovery window;
+if it arrives later, a page update or scroll retries discovery. The Notes panel still lists only
+the rows YouTube has rendered.
 
 ## Install
 

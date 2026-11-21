@@ -19,32 +19,36 @@ Read-only towards YouTube.
    object.
 5. **No YouTube writes.** This script never calls `addVideos`, `removeVideos`, `createPlaylist`
    or any other endpoint.
-6. **Core is required, pinned:** `@require …/yt-core-lib-1.3.0.js`. Row extraction uses
-   `Ytk.lockupToItem`; nothing in the core is re-implemented.
+6. **Core is required, pinned:** `@require …/yt-core-lib-1.4.0.js`. Row extraction uses
+   `Ytk.readRowNode`; nothing in the core is re-implemented.
 
 ## Why the code looks the way it does
 
 - **Two row shapes.** Current playlists render `yt-lockup-view-model` (id in `node.contentId`,
   title in `node.metadata.lockupMetadataViewModel.title.content`); older sessions render
-  `ytd-playlist-video-renderer` / `ytd-playlist-panel-video-renderer`. `idOf()` tries the lockup
-  view model, then `contentId`, then an `a[href*="v="]` anchor, so neither shape is a dead end.
+  `ytd-playlist-video-renderer` / `ytd-playlist-panel-video-renderer`. Both id and title lookups
+  delegate to the pinned core's `Ytk.readRowNode`.
 - **The marker must not land inside a link.** `markerAnchor()` returns the title's enclosing
   anchor when there is one and the dot is inserted *after* it, otherwise clicking the dot would
   open the video.
-- **No `MutationObserver`.** Repainting is driven by `yt-navigate-finish`,
-  `yt-page-data-updated` and a debounced scroll listener. That is cheap and it does not fight
-  YouTube's renderer. The cost is documented in the README: a row re-rendered on hover can lose
-  its dot until the next scroll.
+- **Scoped marker observation replaces the old event-only tradeoff.** A single-row or title
+  replacement need not emit navigation or scroll events. Observe the playlist root, collect
+  affected rows, and coalesce paints without postponing them on each mutation. Drain pending
+  records before disconnecting during marker writes to prevent feedback and lost page changes.
+- **Observation has an owner and a lifetime.** Shallow ancestry watches detect root replacement.
+  Missing roots get a ten-second discovery window, retried by later page/scroll events. Release
+  observers, queued rows and owned dots on root changes, disabling markers, navigation or
+  `pagehide`. Feature disable/navigation also unmount this script's shared toolbar contribution;
+  `pageshow` and playlist arrival can mount it again.
 - **`prompt()` for editing.** A text field inside the floating panel would swallow keyboard
   shortcuts and needs focus management to be usable; the browser dialog does not.
 - **Script-specific settings are read from the raw blob.** `Ytk.settings()` returns only the core's
   own `DEFAULTS` keys, so every `notes*` key is read with `raw()` (`Ytk.storeGet('settings', {})`).
-  Each field's `def` is seeded from the stored value for the same reason — `openSettings` resolves
-  its values through `Ytk.settings()`, which cannot see `notesMaxChars`.
-- **Settings survive because of `onSave`.** Core 1.3.0's `openSettings` writes
-  `ytk.settings` through `saveSettings`, which starts from the core defaults and drops keys it does
-  not know (`notesShowMarkers`, `notesSortFirst`, `notesMaxChars`). The `onSave` merge puts them
-  back.
+  Each field's `def` is seeded from that blob.
+- **Preserve the just-saved settings.** Core 1.4.0's `openSettings` saves raw fields, then passes
+  its core-only settings view to `onSave`. Merge the current raw blob as well as the prior values
+  and callback argument, or saving the marker toggle restores its old value. Refresh the marker
+  lifecycle after saving; preserve unknown keys.
 - **The AI grants stay.** The settings popup renders the shared AI section, which calls
   `GM_xmlhttpRequest`; without `@grant GM_xmlhttpRequest` + `@connect *` its test fails.
 
@@ -54,7 +58,16 @@ Read-only towards YouTube.
 node --check yt-playlist-notes.user.js
 grep -c "GM_registerMenuCommand('Settings…', settingsPopup);" yt-playlist-notes.user.js   # 1
 grep -c "innerHTML" yt-playlist-notes.user.js                                            # 0
+node --test tests/markers.test.cjs
 ```
+
+The browser tests need Playwright with `page.clock` support and an installed Chromium browser.
+They load the production script and the sibling `yt-core-lib/yt-core-lib-1.4.0.js`, use native DOM
+and mutation delivery, and mock GM storage/menu APIs in a fresh context with network requests
+fulfilled locally or blocked. For an isolated worktree, set `YT_CORE_PATH` to the existing pinned
+core file. `PLAYWRIGHT_MODULE` can point to an existing Playwright package directory, and
+`PLAYWRIGHT_CHANNEL=chrome` selects installed Chrome. `NOTES_SOURCE` selects a baseline script;
+`NOTES_ARTIFACTS` optionally saves screenshots. These fixtures are not a live YouTube test.
 
 Then check it on a real playlist: add a note to a row, confirm the dot appears without a reload,
 reload, confirm the dot and the note text are still there, then delete the note and confirm the

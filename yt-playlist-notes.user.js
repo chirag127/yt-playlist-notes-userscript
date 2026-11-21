@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Playlist Notes
 // @namespace    https://github.com/chirag127
-// @version      1.0.2
+// @version      1.0.3
 // @description  One note per video on a playlist, kept in synced storage, with a dot on every row that already has one.
 // @author       chirag127
 // @license      MIT
@@ -27,16 +27,14 @@
  * ONE menu entry: `Settings…` opens the shared settings popup. Writing a note is an
  * action, so it lives on the toolbar and on a row button inside the panel.
  *
- * The marker is display-only: a single span after the row title, repainted after
- * navigation and on scroll. No HTML string is ever assigned.
+ * The marker is display-only: a single span after the row title, kept in place
+ * across row replacements by a scoped observer. No HTML string is ever assigned.
  */
 
 (function () {
   'use strict';
 
   if (typeof Ytk === 'undefined') { console.error('[yt-playlist-notes] core did not load'); return; }
-  if (!Ytk.featureOn('notes', true)) return;
-  if (!onPlaylistSurface()) return;
 
   const KEY = 'note.';
   const MARK = 'ytk-notes-mark';
@@ -49,8 +47,10 @@
   /** The playlist page, or a watch page that has a playlist in the URL or sidebar. */
   function onPlaylistSurface() {
     if (location.pathname === '/playlist') return true;
-    if (new URLSearchParams(location.search).get('list')) return true;
-    return !!document.querySelector('ytd-playlist-panel-renderer');
+    return location.pathname === '/watch' && (
+      !!new URLSearchParams(location.search).get('list') ||
+      !!document.querySelector('ytd-playlist-panel-renderer')
+    );
   }
 
   function raw() { return Ytk.storeGet('settings', {}) || {}; }
@@ -104,49 +104,182 @@
     return title.closest('a') || title;
   }
 
-  function paintMarkers() {
-    const show = raw().notesShowMarkers !== false;
-    const nodes = rowNodes();
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const existing = node.querySelector('.' + MARK);
-      const id = idOf(node);
-      const saved = id ? readNote(id) : null;
-      const host = markerAnchor(node);
-      if (!show || !saved || !host || !host.parentNode) {
-        if (existing) existing.remove();
-        continue;
-      }
-      if (existing) { existing.setAttribute('title', saved.text); continue; }
-      const dot = Ytk.h('span', {
+  let markerRoot = null;
+  let unmountToolbar = null;
+  let suspended = false;
+  let paintTimer = null;
+  let discoveryTimer = null;
+  let paintAll = false;
+  const pendingRows = new Set();
+  const markers = new Map();
+  const rowOptions = { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['href'] };
+
+  const rowObserver = new MutationObserver(function (records) {
+    if (!markersEnabled() || rowRoot() !== markerRoot) { refresh(); return; }
+    collectChanges(records);
+    if (pendingRows.size) schedulePaint();
+  });
+  const ownerObserver = new MutationObserver(function () {
+    if (!markerRoot || !markerRoot.isConnected || rowRoot() !== markerRoot) refresh();
+    else watchParents();
+  });
+  const discoveryObserver = new MutationObserver(function () {
+    if (!markersEnabled() || rowRoot()) refresh();
+  });
+
+  function active() {
+    return !suspended && Ytk.featureOn('notes', true) && onPlaylistSurface();
+  }
+
+  function markersEnabled() { return active() && raw().notesShowMarkers !== false; }
+
+  function collectRows(node) {
+    if (node.nodeType !== 1) return;
+    if (node.matches(ROW_SEL)) pendingRows.add(node);
+    node.querySelectorAll(ROW_SEL).forEach(function (row) { pendingRows.add(row); });
+  }
+
+  function collectChanges(records) {
+    records.forEach(function (record) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      const row = target && target.closest(ROW_SEL);
+      if (row) pendingRows.add(row);
+      record.addedNodes.forEach(collectRows);
+      record.removedNodes.forEach(collectRows);
+    });
+  }
+
+  function removeMarker(node) {
+    const dot = markers.get(node);
+    if (dot) dot.remove();
+    markers.delete(node);
+    node.querySelectorAll('.' + MARK).forEach(function (mark) { mark.remove(); });
+  }
+
+  function paintRow(node) {
+    if (!node.isConnected || !markerRoot.contains(node)) { removeMarker(node); return; }
+    const id = idOf(node);
+    const saved = id ? readNote(id) : null;
+    const host = markerAnchor(node);
+    if (!saved || !host || !host.parentNode) { removeMarker(node); return; }
+
+    let dot = node.querySelector('.' + MARK);
+    const owned = markers.get(node);
+    if (owned && owned !== dot) owned.remove();
+    node.querySelectorAll('.' + MARK).forEach(function (mark) { if (mark !== dot) mark.remove(); });
+    if (!dot) {
+      dot = Ytk.h('span', {
         class: MARK,
         text: '●',
         title: saved.text,
         style: 'color:#ffd479;font-size:10px;margin-left:6px;vertical-align:middle'
       });
-      if (host.nextSibling) host.parentNode.insertBefore(dot, host.nextSibling);
-      else host.parentNode.appendChild(dot);
+    }
+    if (dot.getAttribute('title') !== saved.text) dot.setAttribute('title', saved.text);
+    if (dot.textContent !== '●') dot.textContent = '●';
+    if (host.nextSibling !== dot) host.parentNode.insertBefore(dot, host.nextSibling);
+    markers.set(node, dot);
+  }
+
+  function flushPaint() {
+    if (paintTimer !== null) clearTimeout(paintTimer);
+    paintTimer = null;
+    if (!markerRoot || !markersEnabled() || rowRoot() !== markerRoot) { refresh(); return; }
+
+    // Keep page changes queued before this paint, but never observe our own DOM writes.
+    collectChanges(rowObserver.takeRecords());
+    rowObserver.disconnect();
+    if (paintAll) {
+      markerRoot.querySelectorAll(ROW_SEL).forEach(function (row) { pendingRows.add(row); });
+      markers.forEach(function (dot, row) { if (!markerRoot.contains(row)) pendingRows.add(row); });
+    }
+    paintAll = false;
+    const rows = Array.from(pendingRows);
+    pendingRows.clear();
+    try { rows.forEach(paintRow); }
+    finally { rowObserver.observe(markerRoot, rowOptions); }
+  }
+
+  function paintMarkers() {
+    paintAll = true;
+    flushPaint();
+  }
+
+  function schedulePaint() {
+    // A busy row must not keep postponing its repaint.
+    if (paintTimer === null) paintTimer = setTimeout(flushPaint, 400);
+  }
+
+  function watchParents() {
+    ownerObserver.disconnect();
+    // Shallow ancestry watches detect root removal/reparenting without observing other subtrees.
+    for (let parent = markerRoot.parentNode; parent; parent = parent.parentNode) {
+      ownerObserver.observe(parent, { childList: true });
     }
   }
 
-  let paintTimer = null;
-  function schedulePaint() {
-    if (paintTimer) clearTimeout(paintTimer);
-    paintTimer = setTimeout(function () {
-      paintTimer = null;
-      try { paintMarkers(); } catch (e) { /* the page was mid-navigation */ }
-    }, 400);
+  function stopDiscovery() {
+    discoveryObserver.disconnect();
+    if (discoveryTimer !== null) clearTimeout(discoveryTimer);
+    discoveryTimer = null;
+  }
+
+  function stopMarkers() {
+    rowObserver.disconnect();
+    ownerObserver.disconnect();
+    stopDiscovery();
+    if (paintTimer !== null) clearTimeout(paintTimer);
+    paintTimer = null;
+    paintAll = false;
+    pendingRows.clear();
+    markers.forEach(function (dot) { dot.remove(); });
+    markers.clear();
+    markerRoot = null;
+  }
+
+  function refresh() {
+    if (!active()) {
+      stopMarkers();
+      if (unmountToolbar) { unmountToolbar(); unmountToolbar = null; }
+      if (notesPanel) { notesPanel.close(); notesPanel = null; }
+      bodyEl = null;
+      return;
+    }
+    if (!unmountToolbar) unmountToolbar = Ytk.mountToolbar([{ label: 'Notes', run: openNotes }]);
+    if (!markersEnabled()) { stopMarkers(); return; }
+
+    const next = rowRoot();
+    if (next !== markerRoot) {
+      stopMarkers();
+      markerRoot = next;
+      if (markerRoot) {
+        rowObserver.observe(markerRoot, rowOptions);
+        watchParents();
+      }
+    }
+    if (!markerRoot) {
+      if (discoveryTimer === null) {
+        discoveryObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+        // Late roots get a bounded discovery window; later page/scroll events can retry.
+        discoveryTimer = setTimeout(stopDiscovery, 10000);
+      }
+      return;
+    }
+    paintAll = true;
+    schedulePaint();
   }
 
   // ---------------------------------------------------------------- panel
 
   let bodyEl = null;
+  let notesPanel = null;
 
   function openNotes() {
+    if (!Ytk.featureOn('notes', true)) return;
     if (!onPlaylistSurface()) { Ytk.toast('Open a playlist first'); return; }
     if (!rowNodes().length) { Ytk.toast('No playlist rows loaded yet'); return; }
     bodyEl = null;
-    Ytk.panel('Playlist notes', function (body) {
+    notesPanel = Ytk.panel('Playlist notes', function (body) {
       bodyEl = body;
       render(body);
     });
@@ -245,8 +378,11 @@
         { label: 'Open the notes panel', run: openNotes },
         { label: 'Delete every note on this playlist', run: clearPlaylistNotes }
       ],
-      // Core 1.3.0 rebuilds ytk.settings from its own defaults on save, so merge back.
-      onSave: function (next) { Ytk.storeSet('settings', Object.assign({}, before, next)); }
+      // Core 1.4.0 saves the raw fields before passing its core-only settings view here.
+      onSave: function (next) {
+        Ytk.storeSet('settings', Object.assign({}, before, raw(), next));
+        refresh();
+      }
     });
   }
 
@@ -254,11 +390,17 @@
 
   // ---------------------------------------------------------------- boot
 
-  Ytk.mountToolbar([{ label: 'Notes', run: openNotes }]);
-  schedulePaint();
+  function suspend() { suspended = true; refresh(); }
+  function resume() { suspended = false; refresh(); }
 
-  // YouTube is a single-page app: rows arrive after navigation and after scrolling.
-  document.addEventListener('yt-navigate-finish', schedulePaint);
-  document.addEventListener('yt-page-data-updated', schedulePaint);
-  window.addEventListener('scroll', schedulePaint, { passive: true });
+  document.addEventListener('yt-navigate-start', suspend);
+  document.addEventListener('yt-navigate-finish', resume);
+  document.addEventListener('yt-page-data-updated', refresh);
+  window.addEventListener('scroll', refresh, { passive: true });
+  window.addEventListener('storage', function (event) {
+    if (event.key === null || event.key === 'ytk.settings' || event.key.indexOf('ytk.note.') === 0) refresh();
+  });
+  window.addEventListener('pagehide', suspend);
+  window.addEventListener('pageshow', resume);
+  refresh();
 })();
