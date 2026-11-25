@@ -1,0 +1,35 @@
+name: Browser marker tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  markers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install pinned browser test runner
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.58.2
+          npx --no-install playwright install --with-deps chromium
+      - name: Fetch and verify the pinned shared core fixture
+        run: |
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/yt-core-lib-1.4.0.js" https://raw.githubusercontent.com/chirag127/yt-core-lib/bd6fe4dd17f1e25c3b1a3133604b6465bb0de2a2/yt-core-lib-1.4.0.js
+          echo "91b8435c81a6d02221585e0326a3032134e1ce05cfeb0eef0ad124fe05fca9ce  $RUNNER_TEMP/yt-core-lib-1.4.0.js" | sha256sum --check --strict
+      - name: Check userscript syntax
+        run: node --check yt-playlist-notes.user.js
+      - name: Run isolated native DOM regressions
+        env:
+          YT_CORE_PATH: ${{ runner.temp }}/yt-core-lib-1.4.0.js
+        run: node --test tests/markers.test.cjs
